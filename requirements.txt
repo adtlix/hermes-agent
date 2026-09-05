@@ -1,6 +1,0 @@
-fastapi
-uvicorn
-requests
-python-dotenv
-google-genai
-discord.py
