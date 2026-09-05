@@ -29,13 +29,10 @@ intents = discord.Intents.default()
 intents.message_content = True
 discord_client = discord.Client(intents=intents)
 
-# Ein asyncio.Lock pro Channel verhindert, dass zwei gleichzeitige Nachrichten
-# im selben Channel sich die History zerschießen (Race Condition beim
-# Append/Read). defaultdict erzeugt Locks lazy, nur wenn ein Channel aktiv wird.
 _channel_locks: dict[int, asyncio.Lock] = defaultdict(asyncio.Lock)
 
 MAX_RETRIES = 3
-RETRY_BASE_DELAY = 1.5  # Sekunden, exponentiell: 1.5, 3, 6
+RETRY_BASE_DELAY = 1.5
 
 SYSTEM_INSTRUCTION = """
 Identität: Du bist HERMES. Du agierst als autonomer AGI-Kern, Lead-Engineer und technischer Operator für Julian.
@@ -52,11 +49,9 @@ Werkzeuge & Execution:
 - Liefere ausschließlich produktionsreifen Code.
 """
 
-
 @discord_client.event
 async def on_ready():
     log.info(f"AGI-Kern online als {discord_client.user}")
-
 
 @discord_client.event
 async def on_message(message: discord.Message):
@@ -67,7 +62,6 @@ async def on_message(message: discord.Message):
         await message.channel.send("Systemfehler: Kein GEMINI_API_KEY vorhanden.")
         return
 
-    # /reset – schnelle Kontrolle über die eigene History, ohne Redeploy
     if message.content.strip().lower() in ("/reset", "!reset"):
         persistence.clear_history(message.channel.id)
         await message.channel.send("History für diesen Channel gelöscht.")
@@ -89,16 +83,13 @@ async def on_message(message: discord.Message):
     channel_id = message.channel.id
     lock = _channel_locks[channel_id]
 
-    # Verhindert Race Conditions: zwei Nachrichten im selben Channel werden
-    # nacheinander statt parallel verarbeitet, damit die History konsistent bleibt.
     async with lock:
         async with message.channel.typing():
             try:
                 await process_message(message, channel_id, user_parts)
             except Exception as e:
                 log.exception("Unbehandelter Fehler in process_message")
-                await message.channel.send(f"Fehler: {str(e)}")
-
+                await message.channel.send(f"Fehler: {str(e)[:1800]}")
 
 async def process_message(message: discord.Message, channel_id: int, user_parts: list):
     persistence.append_message(channel_id, "user", user_parts)
@@ -107,7 +98,7 @@ async def process_message(message: discord.Message, channel_id: int, user_parts:
     route = await run_blocking(classify_intent, ai_client, latest_text)
     tools = build_tools_for_route(route, CREATE_FILE_TOOL)
 
-    history = persistence.get_history(channel_id)
+    history = persistence.get_history(channel_id) or []
 
     response = await call_gemini_with_retry(history, tools)
     reply_text, discord_files = await handle_response(response, channel_id, history, tools)
@@ -115,20 +106,17 @@ async def process_message(message: discord.Message, channel_id: int, user_parts:
     persistence.append_message(channel_id, "model", [reply_text])
     await send_reply(message.channel, reply_text, discord_files)
 
-
 async def run_blocking(func, *args, **kwargs):
-    """Führt einen blockierenden SDK-Call in einem Thread aus, damit der Discord-Gateway-Loop nicht einfriert."""
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(None, lambda: func(*args, **kwargs))
 
-
 async def call_gemini_with_retry(history: list, tools: list):
-    """
-    Ruft Gemini mit Exponential Backoff auf. Fängt transiente Fehler ab
-    (Rate-Limits, 5xx), bricht bei permanenten Client-Fehlern (4xx außer 429)
-    sofort ab, statt sie sinnlos zu wiederholen.
-    """
-    config = types.GenerateContentConfig(system_instruction=SYSTEM_INSTRUCTION, tools=tools or None)
+    # tools darf nur übergeben werden, wenn es nicht leer ist
+    clean_tools = tools if (tools and len(tools) > 0) else None
+    config = types.GenerateContentConfig(
+        system_instruction=SYSTEM_INSTRUCTION,
+        tools=clean_tools
+    )
 
     last_error = None
     for attempt in range(MAX_RETRIES):
@@ -146,7 +134,7 @@ async def call_gemini_with_retry(history: list, tools: list):
                 await asyncio.sleep(delay)
                 last_error = e
                 continue
-            raise  # 4xx ist ein Programmier-/Eingabefehler, kein Retry sinnvoll
+            raise
         except ServerError as e:
             if attempt < MAX_RETRIES - 1:
                 delay = RETRY_BASE_DELAY * (2 ** attempt)
@@ -158,17 +146,18 @@ async def call_gemini_with_retry(history: list, tools: list):
 
     raise last_error
 
-
 async def handle_response(response, channel_id: int, history: list, tools: list):
-    """
-    Verarbeitet eine Gemini-Response. Enthält sie einen create_file
-    function_call, wird die Datei gebaut, das Ergebnis als function_response
-    zurück an Gemini geschickt, und die Datei für den Discord-Upload vorbereitet.
-    """
     discord_files = []
 
-    candidate = response.candidates[0] if response.candidates else None
-    parts = candidate.content.parts if candidate and candidate.content else []
+    if not response or not response.candidates:
+        return "Keine Antwort vom Modell erhalten.", discord_files
+
+    candidate = response.candidates[0]
+    # Hier lag der None-Absturz: parts ist bei manchen Responses None
+    parts = []
+    if candidate and candidate.content and candidate.content.parts:
+        parts = candidate.content.parts
+
     function_calls = [p.function_call for p in parts if getattr(p, "function_call", None)]
 
     if not function_calls:
@@ -184,7 +173,7 @@ async def handle_response(response, channel_id: int, history: list, tools: list)
             )
             continue
 
-        args = dict(call.args)
+        args = dict(call.args or {})
         result = await run_blocking(
             build_file,
             filename=args.get("filename", "output"),
@@ -213,11 +202,10 @@ async def handle_response(response, channel_id: int, history: list, tools: list)
 
     persistence.append_message(channel_id, "user", function_response_parts)
 
-    follow_up_history = persistence.get_history(channel_id)
+    follow_up_history = persistence.get_history(channel_id) or []
     follow_up = await call_gemini_with_retry(follow_up_history, tools=[])
 
     return (follow_up.text or "Datei erstellt."), discord_files
-
 
 async def send_reply(channel, reply_text: str, discord_files: list):
     if len(reply_text) <= 1950:
@@ -229,26 +217,22 @@ async def send_reply(channel, reply_text: str, discord_files: list):
         is_last = i == len(chunks) - 1
         await channel.send(chunk, files=discord_files if is_last else None)
 
-
 def run_discord():
     if not DISCORD_TOKEN:
-        log.warning("Kein DISCORD_BOT_TOKEN gesetzt, Discord-Client startet nicht.")
+        log.warning("Kein DISCORD_BOT_TOKEN gesetzt.")
         return
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     discord_client.run(DISCORD_TOKEN)
-
 
 @app.on_event("startup")
 def startup():
     persistence.init_db()
     threading.Thread(target=run_discord, daemon=True).start()
 
-
 @app.get("/")
 def health_check():
     return {"status": "online", "mode": "AGI-Engine + Tools + Persistence"}
-
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
