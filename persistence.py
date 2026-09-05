@@ -3,16 +3,11 @@ persistence.py
 ---------------
 SQLite-Speicher für Channel-Historien statt eines flüchtigen In-Memory-Dicts.
 
-Wichtige Einschränkung (ehrlich, nicht schöngeredet): Render Free-Tier hat
-KEIN persistentes Volume. Diese Datei liegt im Container-Filesystem und wird
-bei jedem Deploy/Neustart gelöscht. Was das hier trotzdem bringt:
-  - Der Bot überlebt einen Absturz durch eine unbehandelte Exception im
-    Prozess, ohne dass die aktuelle Session-History verloren geht.
-  - Die Struktur ist fertig für einen Umstieg auf Postgres/Supabase
-    (siehe get_connection() — einziger Ort, der geändert werden müsste).
-
-Nachrichten werden als JSON serialisiert, weil Gemini-Parts (Text, Bilder,
-function_call, function_response) unterschiedliche Felder haben.
+Wichtige Einschränkung: Render Free-Tier hat KEIN persistentes Volume.
+Diese Datei liegt im Container-Filesystem und wird bei jedem Deploy/Neustart gelöscht.
+Vorteile trotzdem:
+  - Der Bot überlebt temporäre Prozess-Crashes ohne Session-Verlust.
+  - Bereit für Postgres/Supabase-Erweiterung über get_connection().
 """
 
 import sqlite3
@@ -20,9 +15,10 @@ import json
 import time
 import threading
 from contextlib import contextmanager
+from google.genai import types
 
 DB_PATH = "/tmp/hermes_state.db"
-MAX_HISTORY_PER_CHANNEL = 12  # etwas großzügiger als vorher (8), da jetzt persistent
+MAX_HISTORY_PER_CHANNEL = 12
 
 _local = threading.local()
 
@@ -32,11 +28,11 @@ def get_connection():
     """Thread-lokale Connection, da discord.py und FastAPI unterschiedliche Threads nutzen."""
     if not hasattr(_local, "conn"):
         _local.conn = sqlite3.connect(DB_PATH, check_same_thread=False)
-        _local.conn.execute("PRAGMA journal_mode=WAL")  # weniger Lock-Konflikte bei parallelen Channels
+        _local.conn.execute("PRAGMA journal_mode=WAL")
     try:
         yield _local.conn
     finally:
-        pass  # Connection bleibt offen, wird bei Prozess-Ende automatisch geschlossen
+        pass
 
 
 def init_db():
@@ -55,13 +51,7 @@ def init_db():
 
 
 def _serialize_parts(parts) -> str:
-    """
-    Serialisiert Gemini-Parts robust. Reine Strings, Part-Objekte mit .text,
-    und einfache Dicts (z.B. aus function_response) werden abgedeckt.
-    Nicht-serialisierbare Inhalte (z.B. rohe Bild-Bytes) werden als
-    Platzhalter gespeichert, da Bilder ohnehin nicht sinnvoll über einen
-    Neustart hinweg wiederverwendet werden.
-    """
+    """Serialisiert Gemini-Parts in JSON."""
     serializable = []
     for part in parts:
         if isinstance(part, str):
@@ -90,20 +80,20 @@ def _serialize_parts(parts) -> str:
 
 
 def _deserialize_parts(parts_json: str) -> list:
-    from google.genai import types
-
+    """Deserialisiert JSON strikt in valide types.Part-Objekte für das Google GenAI SDK."""
     raw = json.loads(parts_json)
     parts = []
     for item in raw:
         if item["type"] == "text":
-            parts.append(item["value"])
+            parts.append(types.Part.from_text(text=item["value"]))
         elif item["type"] == "function_call":
             parts.append(types.Part(function_call=types.FunctionCall(name=item["name"], args=item["args"])))
         elif item["type"] == "function_response":
             parts.append(types.Part(function_response=types.FunctionResponse(name=item["name"], response=item["response"])))
         elif item["type"] == "image_placeholder":
-            parts.append("[Bild aus vorheriger Nachricht, nicht mehr im Kontext]")
+            parts.append(types.Part.from_text(text="[Bild aus vorheriger Nachricht]"))
     return parts
+
 
 def append_message(channel_id: int, role: str, parts) -> None:
     with get_connection() as conn:
