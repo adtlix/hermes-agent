@@ -1,52 +1,74 @@
 import os
 import threading
-import time
-from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
+import asyncio
+from fastapi import FastAPI
 import uvicorn
 from google import genai
+import discord
 
 app = FastAPI()
 
-# API-Client initialisieren
-api_key = os.environ.get("GEMINI_API_KEY")
-client = genai.Client(api_key=api_key) if api_key else None
+# Tokens aus Umgebungsvariablen
+DISCORD_TOKEN = os.environ.get("DISCORD_BOT_TOKEN")
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 
-class PromptRequest(BaseModel):
-    prompt: str
+# Gemini Client
+ai_client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
 
-def hermes_background_worker():
-    """Hintergrund-Thread für autonome Aufgaben des Agenten."""
-    print("[Hermes] Hintergrund-Dienst aktiv.")
-    while True:
-        # Hier können zeitgesteuerte Agenten-Tasks laufen
-        time.sleep(60)
+# Discord Client initialisieren
+intents = discord.Intents.default()
+intents.message_content = True
+discord_client = discord.Client(intents=intents)
+
+@discord_client.event
+async def on_ready():
+    print(f"[Hermes] Erfolgreich eingeloggt als {discord_client.user}")
+
+@discord_client.event
+async def on_message(message):
+    # Eigene Nachrichten ignorieren
+    if message.author == discord_client.user:
+        return
+
+    if not ai_client:
+        await message.channel.send("Fehler: GEMINI_API_KEY fehlt auf dem Server.")
+        return
+
+    async with message.channel.typing():
+        try:
+            response = ai_client.models.generate_content(
+                model="gemini-2.5-flash",
+                contents=message.content
+            )
+            reply_text = response.text
+            # Discord Nachrichtenlimit von 2000 Zeichen beachten
+            if len(reply_text) <= 2000:
+                await message.channel.send(reply_text)
+            else:
+                for i in range(0, len(reply_text), 2000):
+                    await message.channel.send(reply_text[i:i+2000])
+        except Exception as e:
+            await message.channel.send(f"Fehler: {str(e)}")
+
+def run_discord():
+    if not DISCORD_TOKEN:
+        print("[Hermes] WARNUNG: DISCORD_BOT_TOKEN fehlt in Environment Variables.")
+        return
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    discord_client.run(DISCORD_TOKEN)
 
 @app.on_event("startup")
 def startup():
-    threading.Thread(target=hermes_background_worker, daemon=True).start()
+    threading.Thread(target=run_discord, daemon=True).start()
 
 @app.get("/")
 def health_check():
     return {
         "status": "online",
-        "service": "Hermes Cloud Agent",
-        "api_configured": client is not None
+        "service": "Hermes Discord Bot",
+        "bot_configured": DISCORD_TOKEN is not None
     }
-
-@app.post("/chat")
-def generate_response(req: PromptRequest):
-    if not client:
-        raise HTTPException(status_code=500, detail="GEMINI_API_KEY ist nicht konfiguriert.")
-    
-    try:
-        response = client.models.generate_content(
-            model="gemini-2.5-flash",
-            contents=req.prompt
-        )
-        return {"response": response.text}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
