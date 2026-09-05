@@ -1,17 +1,13 @@
 """
-tools_router.py
-----------------
-Gemini erlaubt es NICHT, serverseitige Tools (google_search, code_execution)
-zusammen mit eigenen function_declarations (create_file) in einer Anfrage
-zu kombinieren. Statt eines davon zu opfern, entscheidet ein schneller,
-günstiger Klassifikations-Call zuerst, welche Tool-Klasse gebraucht wird,
-bevor der eigentliche (teurere) Call mit der richtigen Tool-Kombination
-läuft.
+_ROUTER_INSTRUCTION = """
+Du bist ein kompromissloser Intent-Klassifikator. Antworte AUSSCHLIESSLICH mit genau einem Wort:
 
-Das kostet einen zusätzlichen Flash-Call (schnell, minimale Tokenzahl),
-verhindert dafür aber, dass Hermes bei "durchsuche das Web und bau mir eine
-xlsx daraus" strukturell scheitert, weil beide Tool-Typen gleichzeitig nötig
-wären, aber nur eines aktiv ist.
+web_code  -> wenn die Anfrage Recherche, aktuelle News, Ereignisse ("letzte Woche", "heute", "News", "Recherche"), Wetter, Faktenprüfung, Mathematik oder Code-Ausführung erfordert.
+file      -> wenn die Anfrage eine herunterladbare Datei erfordert (z.B. "als PDF", "als Excel", "als .py Datei", "Download").
+plain     -> NUR für reine Logikfragen, Code-Refactorings im Chat oder Begriffsdefinitionen ohne Aktualitätsbezug.
+
+Regel: Sobald nach "News", "neu", "letzte Woche", "Recherche", "Quellen" oder aktuellen Fakten gefragt wird, MUSS die Antwort zwingend "web_code" lauten.
+"""
 """
 
 from google import genai
