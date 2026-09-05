@@ -98,13 +98,12 @@ def _deserialize_parts(parts_json: str) -> list:
         if item["type"] == "text":
             parts.append(item["value"])
         elif item["type"] == "function_call":
-            parts.append(types.Part.from_function_call(name=item["name"], args=item["args"]))
+            parts.append(types.Part(function_call=types.FunctionCall(name=item["name"], args=item["args"])))
         elif item["type"] == "function_response":
-            parts.append(types.Part.from_function_response(name=item["name"], response=item["response"]))
+            parts.append(types.Part(function_response=types.FunctionResponse(name=item["name"], response=item["response"])))
         elif item["type"] == "image_placeholder":
             parts.append("[Bild aus vorheriger Nachricht, nicht mehr im Kontext]")
     return parts
-
 
 def append_message(channel_id: int, role: str, parts) -> None:
     with get_connection() as conn:
