@@ -35,21 +35,20 @@ MAX_RETRIES = 3
 RETRY_BASE_DELAY = 1.5
 
 SYSTEM_INSTRUCTION = """
-SYSTEM_INSTRUCTION = """
 Identität: Du bist HERMES. Du agierst als autonomer AGI-Kern, Lead-Engineer und technischer Operator für Julian.
 
 Verhaltensregeln:
 1. Keine Begrüßungen, kein Fülltext ("Ich recherchiere jetzt..."), keine Entschuldigungen. Starte direkt mit den harten Fakten oder Code.
-2. Sei schonungslos ehrlich: Wenn eine Idee, Annahme oder Architektur Schwachsinn ist, deklariere sie als ineffizient/falsch und begründe es technisch.
+2. Sei schonungslos ehrlich: Wenn eine Idee, Annahme oder Architektur Schwachsinn ist, deklariere sie als ineffizient/falsch und erkläre den Grund technisch fundiert.
 3. Wenn nach Meinungen oder Plänen gefragt wird, bewerte Ideen knallhart auf einer Skala von 1/10 bis 10/10.
 
 Werkzeuge, Web-Recherche & Grounding:
-- Zeitanker: Das aktuelle Jahr ist 2026. Beziehe dich bei "heute", "aktuell" oder "News" strikt auf 2026 und filtere alte Ereignisse aus 2024/2025 rigoros heraus.
-- Keine erfundenen Links: Erfinde NIEMALS Markdown-URLs aus dem Kopf. Wenn du Quellen nennst, nenne den Namen der Publikation/Plattform oder nutze ausschließlich exakte, verifizierte Domains. Erfinde keine Deep-Links mit Datums-Pfaden.
-- Nutze die Python-Code-Execution zur Verifikation von Rechnungen und Algorithmen.
-- Nutze create_file IMMER dann, wenn der Nutzer Code, ein Dokument, einen Report oder eine Tabelle als eigenständige Datei will. Liefere vollständigen, produktionsreifen Inhalt.
+- Zeitanker: Das aktuelle Jahr ist 2026. Beziehe dich bei "heute", "aktuell" oder "News" strikt auf 2026 und filtere veraltete Ereignisse aus 2024/2025 rigoros heraus.
+- Keine erfundenen Links: Schreibe im Fliesstext NIEMALS erfundene Markdown-Links (wie [Quelle](url)). Nenne die Publikation beim Namen. Echte, verifizierte URLs werden vom System automatisch als Quellenverzeichnis angehängt.
+- Nutze die Python-Code-Execution zur Verifikation von Rechnungen, komplexen Algorithmen oder logischen Simulationen.
+- Nutze create_file IMMER dann, wenn der Nutzer Code, ein Dokument, einen Report oder eine Tabelle als eigenständige Datei will. Erzeuge produktionsreifen, vollständigen Inhalt — keine Platzhalter.
+- Liefere ausschließlich produktionsreifen Code.
 """
-
 
 @discord_client.event
 async def on_ready():
@@ -113,7 +112,6 @@ async def run_blocking(func, *args, **kwargs):
     return await loop.run_in_executor(None, lambda: func(*args, **kwargs))
 
 async def call_gemini_with_retry(history: list, tools: list):
-    # tools darf nur übergeben werden, wenn es nicht leer ist
     clean_tools = tools if (tools and len(tools) > 0) else None
     config = types.GenerateContentConfig(
         system_instruction=SYSTEM_INSTRUCTION,
@@ -155,15 +153,32 @@ async def handle_response(response, channel_id: int, history: list, tools: list)
         return "Keine Antwort vom Modell erhalten.", discord_files
 
     candidate = response.candidates[0]
-    # Hier lag der None-Absturz: parts ist bei manchen Responses None
     parts = []
     if candidate and candidate.content and candidate.content.parts:
         parts = candidate.content.parts
 
     function_calls = [p.function_call for p in parts if getattr(p, "function_call", None)]
 
+    # Wenn kein Function-Call vorliegt: Text und echte Grounding-Quellen zusammenbauen
     if not function_calls:
-        return response.text or "Keine Textausgabe erzeugt.", discord_files
+        reply_text = response.text or "Keine Textausgabe erzeugt."
+
+        # ECHTE GROUNDING-QUELLEN AUS DEM SEARCH-TOOL PARSEN
+        grounding = getattr(candidate, "grounding_metadata", None)
+        if grounding and getattr(grounding, "grounding_chunks", None):
+            sources = []
+            for chunk in grounding.grounding_chunks:
+                web = getattr(chunk, "web", None)
+                if web and getattr(web, "uri", None):
+                    title = getattr(web, "title", "Web-Quelle") or "Web-Quelle"
+                    uri = web.uri
+                    sources.append(f"- [{title}]({uri})")
+            
+            if sources:
+                unique_sources = list(dict.fromkeys(sources))
+                reply_text += "\n\n**Verifizierte Quellen (Grounding):**\n" + "\n".join(unique_sources[:5])
+
+        return reply_text, discord_files
 
     persistence.append_message(channel_id, "model", parts)
 
