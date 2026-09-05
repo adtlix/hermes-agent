@@ -78,12 +78,11 @@ async def on_message(message):
 
     async with message.channel.typing():
         try:
-            # Konfiguration mit Google Search & Code Execution Tools
             config = types.GenerateContentConfig(
                 system_instruction=SYSTEM_INSTRUCTION,
                 tools=[
-                    types.Tool(google_search=types.GoogleSearch()),
-                    types.Tool(code_execution=types.CodeExecution())
+                    {"google_search": {}},
+                    {"code_execution": {}}
                 ]
             )
 
